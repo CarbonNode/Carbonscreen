@@ -5,6 +5,10 @@
   "main": "dist/main/index.js",
   "author": "Carbon",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/CarbonNode/Carbonscreen.git"
+  },
   "scripts": {
     "dev": "concurrently \"npm run dev:renderer\" \"npm run dev:main\"",
     "dev:renderer": "next dev src/renderer -p 3456",
