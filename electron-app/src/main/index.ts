@@ -1,4 +1,4 @@
-import { app, BrowserWindow, Tray, Menu, ipcMain, nativeImage, shell } from 'electron';
+import { app, BrowserWindow, Tray, Menu, ipcMain, nativeImage, screen } from 'electron';
 import * as path from 'path';
 import { IdleChecker } from './idleChecker';
 import { ConfigStore } from './config';
@@ -19,17 +19,33 @@ if (!gotTheLock) {
   app.quit();
 } else {
   let mainWindow: BrowserWindow | null = null;
+  let widgetWindow: BrowserWindow | null = null;
   let tray: Tray | null = null;
   let idleChecker: IdleChecker | null = null;
   const config = new ConfigStore();
 
   const isDev = process.env.NODE_ENV === 'development' || !app.isPackaged;
 
+  // Floating widget window dimensions. The window is larger than the visible
+  // pill (220x76) so its soft shadow/green glow has transparent room and isn't
+  // clipped at the window edge; the surrounding margin is part of the drag area.
+  const WIDGET_WIDTH = 268;
+  const WIDGET_HEIGHT = 120;
+
   function getResourcePath(filename: string): string {
     if (isDev) {
       return path.join(__dirname, '../../resources', filename);
     }
     return path.join(process.resourcesPath, 'resources', filename);
+  }
+
+  // Send a message to every live renderer (main window + floating widget).
+  function broadcast(channel: string, ...args: any[]): void {
+    BrowserWindow.getAllWindows().forEach((win) => {
+      if (!win.isDestroyed()) {
+        win.webContents.send(channel, ...args);
+      }
+    });
   }
 
   function createWindow(): void {
@@ -80,19 +96,122 @@ if (!gotTheLock) {
     });
   }
 
-  function createTray(): void {
+  // True when the widget's centre would land on a currently-connected display, so a
+  // stale saved position (e.g. from an unplugged monitor) falls back to the default.
+  function isOnScreen(x: number, y: number, w: number, h: number): boolean {
+    const cx = x + w / 2;
+    const cy = y + h / 2;
+    return screen.getAllDisplays().some((display) => {
+      const area = display.workArea;
+      return cx >= area.x && cx <= area.x + area.width && cy >= area.y && cy <= area.y + area.height;
+    });
+  }
+
+  function createWidgetWindow(): void {
     const iconPath = getResourcePath('icon.ico');
-    const icon = nativeImage.createFromPath(iconPath);
+    const primary = screen.getPrimaryDisplay().workArea;
+    const defaultX = primary.x + primary.width - WIDGET_WIDTH - 24;
+    const defaultY = primary.y + primary.height - WIDGET_HEIGHT - 24;
 
-    tray = new Tray(icon.resize({ width: 16, height: 16 }));
-    tray.setToolTip("Carbon Screen");
+    const saved = config.get('widgetPosition', null);
+    const useSaved = saved !== null && isOnScreen(saved.x, saved.y, WIDGET_WIDTH, WIDGET_HEIGHT);
 
-    const contextMenu = Menu.buildFromTemplate([
+    widgetWindow = new BrowserWindow({
+      width: WIDGET_WIDTH,
+      height: WIDGET_HEIGHT,
+      x: useSaved ? saved!.x : defaultX,
+      y: useSaved ? saved!.y : defaultY,
+      frame: false,
+      transparent: true,
+      resizable: false,
+      movable: true,
+      minimizable: false,
+      maximizable: false,
+      fullscreenable: false,
+      skipTaskbar: true,
+      alwaysOnTop: true,
+      hasShadow: false,
+      icon: iconPath,
+      title: 'CarbonScreen Widget',
+      webPreferences: {
+        nodeIntegration: false,
+        contextIsolation: true,
+        preload: path.join(__dirname, 'preload.js'),
+      },
+      show: false,
+    });
+
+    // Float above normal windows without climbing onto the screensaver layer.
+    widgetWindow.setAlwaysOnTop(true, 'floating');
+
+    if (isDev) {
+      widgetWindow.loadURL('http://localhost:3456/widget');
+    } else {
+      widgetWindow.loadFile(path.join(__dirname, '../renderer/widget/index.html'));
+    }
+
+    // Persist position as the user drags the frameless window around.
+    widgetWindow.on('moved', () => {
+      if (!widgetWindow || widgetWindow.isDestroyed()) return;
+      const [x, y] = widgetWindow.getPosition();
+      config.set('widgetPosition', { x, y });
+    });
+
+    // Closing the widget (e.g. Alt+F4) just hides it unless the app is quitting.
+    widgetWindow.on('close', (event) => {
+      if (!isQuitting) {
+        event.preventDefault();
+        hideWidget();
+      }
+    });
+
+    widgetWindow.on('closed', () => {
+      widgetWindow = null;
+    });
+  }
+
+  function showWidget(): void {
+    if (!widgetWindow || widgetWindow.isDestroyed()) {
+      createWidgetWindow();
+    }
+    widgetWindow?.show();
+    config.set('widgetEnabled', true);
+    notifyWidgetVisibility(true);
+    refreshTrayMenu();
+  }
+
+  function hideWidget(): void {
+    widgetWindow?.hide();
+    config.set('widgetEnabled', false);
+    notifyWidgetVisibility(false);
+    refreshTrayMenu();
+  }
+
+  function notifyWidgetVisibility(visible: boolean): void {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('widget-visibility-changed', visible);
+    }
+  }
+
+  function buildTrayMenu(): Menu {
+    return Menu.buildFromTemplate([
       {
         label: 'Show',
         click: () => {
           mainWindow?.show();
           mainWindow?.focus();
+        },
+      },
+      {
+        label: 'Floating Widget',
+        type: 'checkbox',
+        checked: config.get('widgetEnabled', false),
+        click: (menuItem) => {
+          if (menuItem.checked) {
+            showWidget();
+          } else {
+            hideWidget();
+          }
         },
       },
       {
@@ -117,8 +236,19 @@ if (!gotTheLock) {
         },
       },
     ]);
+  }
 
-    tray.setContextMenu(contextMenu);
+  function refreshTrayMenu(): void {
+    tray?.setContextMenu(buildTrayMenu());
+  }
+
+  function createTray(): void {
+    const iconPath = getResourcePath('icon.ico');
+    const icon = nativeImage.createFromPath(iconPath);
+
+    tray = new Tray(icon.resize({ width: 16, height: 16 }));
+    tray.setToolTip("Carbon Screen");
+    tray.setContextMenu(buildTrayMenu());
 
     tray.on('double-click', () => {
       mainWindow?.show();
@@ -133,6 +263,7 @@ if (!gotTheLock) {
         idleThreshold: config.get('idleThreshold', 1),
         startupEnabled: isInStartup(),
         isActive: config.get('isActive', true),
+        widgetEnabled: config.get('widgetEnabled', false),
       };
     });
 
@@ -140,6 +271,7 @@ if (!gotTheLock) {
     ipcMain.handle('set-idle-threshold', (_event, minutes: number) => {
       config.set('idleThreshold', minutes);
       idleChecker?.setThreshold(minutes);
+      broadcast('threshold-changed', minutes);
       return true;
     });
 
@@ -148,8 +280,8 @@ if (!gotTheLock) {
       const success = setStartup(enabled);
       if (success) {
         config.set('startupEnabled', enabled);
-        // Update tray menu
-        createTray();
+        // Update tray menu checkbox
+        refreshTrayMenu();
       }
       return success;
     });
@@ -158,6 +290,7 @@ if (!gotTheLock) {
     ipcMain.handle('toggle-active', (_event, active: boolean) => {
       config.set('isActive', active);
       idleChecker?.setActive(active);
+      broadcast('active-changed', active);
       return true;
     });
 
@@ -174,6 +307,31 @@ if (!gotTheLock) {
     ipcMain.handle('get-remaining-time', () => {
       return idleChecker?.getRemainingTime() ?? 0;
     });
+
+    // Floating widget — initial state for its first render
+    ipcMain.handle('widget:get-state', () => {
+      const threshold = config.get('idleThreshold', 1) as number;
+      return {
+        remainingTime: idleChecker?.getRemainingTime() ?? threshold * 60,
+        totalTime: threshold * 60,
+        isActive: config.get('isActive', true),
+      };
+    });
+
+    // Show/hide the floating widget (from the main window toggle)
+    ipcMain.handle('toggle-widget', (_event, enabled: boolean) => {
+      if (enabled) {
+        showWidget();
+      } else {
+        hideWidget();
+      }
+      return enabled;
+    });
+
+    // Hide the widget (from its own close affordance)
+    ipcMain.on('widget:hide', () => {
+      hideWidget();
+    });
   }
 
   app.whenReady().then(() => {
@@ -186,10 +344,15 @@ if (!gotTheLock) {
     const isActive = config.get('isActive', true) as boolean;
 
     idleChecker = new IdleChecker(threshold, (remaining) => {
-      mainWindow?.webContents.send('countdown-update', remaining);
+      broadcast('countdown-update', remaining);
     });
 
     idleChecker.setActive(isActive);
+
+    // Restore the floating widget if it was left enabled last session
+    if (config.get('widgetEnabled', false)) {
+      showWidget();
+    }
   });
 
   app.on('second-instance', () => {

@@ -9,6 +9,7 @@ interface Config {
   idleThreshold: number;
   startupEnabled: boolean;
   isActive: boolean;
+  widgetEnabled: boolean;
 }
 
 export default function Home() {
@@ -16,6 +17,7 @@ export default function Home() {
     idleThreshold: 1,
     startupEnabled: false,
     isActive: true,
+    widgetEnabled: false,
   });
   const [remainingTime, setRemainingTime] = useState<number>(60);
   const [isLoaded, setIsLoaded] = useState(false);
@@ -64,6 +66,17 @@ export default function Home() {
     }
   }, []);
 
+  // Keep the toggle in sync when the widget is shown/hidden from the tray
+  useEffect(() => {
+    if (typeof window !== 'undefined' && window.electronAPI) {
+      const unsubscribe = window.electronAPI.onWidgetVisibilityChanged((visible) => {
+        setConfig((prev) => ({ ...prev, widgetEnabled: visible }));
+      });
+
+      return () => unsubscribe();
+    }
+  }, []);
+
   const handleThresholdChange = useCallback(async (minutes: number) => {
     setConfig((prev) => ({ ...prev, idleThreshold: minutes }));
     if (typeof window !== 'undefined' && window.electronAPI) {
@@ -86,6 +99,13 @@ export default function Home() {
     setConfig((prev) => ({ ...prev, isActive: active }));
     if (typeof window !== 'undefined' && window.electronAPI) {
       await window.electronAPI.toggleActive(active);
+    }
+  }, []);
+
+  const handleWidgetToggle = useCallback(async (enabled: boolean) => {
+    setConfig((prev) => ({ ...prev, widgetEnabled: enabled }));
+    if (typeof window !== 'undefined' && window.electronAPI) {
+      await window.electronAPI.toggleWidget(enabled);
     }
   }, []);
 
@@ -119,6 +139,13 @@ export default function Home() {
             />
 
             <div className="toggle-group">
+              <ToggleSwitch
+                label="Floating Widget"
+                checked={config.widgetEnabled}
+                onChange={handleWidgetToggle}
+                accentColor="success"
+              />
+
               <ToggleSwitch
                 label="Start with Windows"
                 checked={config.startupEnabled}

@@ -4,12 +4,16 @@ interface ConfigSchema {
   idleThreshold: number;
   startupEnabled: boolean;
   isActive: boolean;
+  widgetEnabled: boolean;
+  widgetPosition: { x: number; y: number } | null;
 }
 
 const defaults: ConfigSchema = {
   idleThreshold: 1,
   startupEnabled: false,
   isActive: true,
+  widgetEnabled: false,
+  widgetPosition: null,
 };
 
 export class ConfigStore {
